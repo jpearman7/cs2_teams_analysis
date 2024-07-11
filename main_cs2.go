@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -77,17 +78,29 @@ func main() {
 
 	// Process each .dem file
 	for _, demoFile := range demoFiles {
-		processDemo(demoFile, outputDir)
+		err := processDemo(demoFile, outputDir)
+		if err != nil {
+			fmt.Printf("Error processing %s: %v\n", demoFile, err)
+			// Optionally, you can choose to continue with the next file
+			// continue
+		}
 	}
 }
 
-func processDemo(demoFile, outputDir string) {
+func processDemo(demoFile, outputDir string) error {
 	fmt.Printf("Processing file: %s\n", demoFile)
+
+	// Defer a function to catch and log panics
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic in processDemo: %v\n", r)
+			debug.PrintStack()
+		}
+	}()
 
 	file, err := os.Open(demoFile)
 	if err != nil {
-		fmt.Printf("Error opening file %s: %v\n", demoFile, err)
-		return
+		return fmt.Errorf("error opening file %s: %v", demoFile, err)
 	}
 	defer file.Close()
 
@@ -96,15 +109,13 @@ func processDemo(demoFile, outputDir string) {
 
 	_, err = parser.ParseHeader()
 	if err != nil {
-		fmt.Printf("Error parsing header of %s: %v\n", demoFile, err)
-		return
+		return fmt.Errorf("error parsing header of %s: %v", demoFile, err)
 	}
 
 	outputFile := filepath.Join(outputDir, strings.TrimSuffix(filepath.Base(demoFile), ".dem")+".csv")
 	output, err := os.Create(outputFile)
 	if err != nil {
-		fmt.Printf("Error creating output file for %s: %v\n", demoFile, err)
-		return
+		return fmt.Errorf("error creating output file for %s: %v", demoFile, err)
 	}
 	defer output.Close()
 
@@ -141,12 +152,12 @@ func processDemo(demoFile, outputDir string) {
 	})
 
 	parser.RegisterEventHandler(func(e events.PlayerHurt) {
-		victim := e.Player
-		attacker := e.Attacker
-
-		if victim == nil || attacker == nil {
+		if e.Player == nil || e.Attacker == nil {
 			return
 		}
+
+		victim := e.Player
+		attacker := e.Attacker
 
 		if _, exists := damageInfo[victim.SteamID64]; !exists {
 			damageInfo[victim.SteamID64] = make(map[string]*DamageInfo)
@@ -181,7 +192,15 @@ func processDemo(demoFile, outputDir string) {
 			}
 
 			for _, player := range parser.GameState().Participants().Playing() {
+				if player == nil {
+					continue // Skip if player is nil
+				}
+
 				teamState := player.TeamState
+				if teamState == nil {
+					continue // Skip if teamState is nil
+				}
+
 				playerData := PlayerData{
 					Name:              player.Name,
 					IsBot:             player.IsBot,
@@ -230,11 +249,15 @@ func processDemo(demoFile, outputDir string) {
 				if killEventData != nil {
 					if killEventData.Killer != nil && killEventData.Killer.Name == player.Name {
 						playerData.KillEvent = true
-						playerData.Killed = killEventData.Victim.Name
+						if killEventData.Victim != nil {
+							playerData.Killed = killEventData.Victim.Name
+						}
 					}
 					if killEventData.Victim != nil && killEventData.Victim.Name == player.Name {
 						playerData.KillEvent = true
-						playerData.KilledBy = killEventData.Killer.Name
+						if killEventData.Killer != nil {
+							playerData.KilledBy = killEventData.Killer.Name
+						}
 					}
 					if killEventData.Assister != nil {
 						playerData.Assisters = killEventData.Assister.Name
@@ -307,6 +330,9 @@ func processDemo(demoFile, outputDir string) {
 					strconv.FormatFloat(float64(playerData.FlashDuration), 'f', 2, 32),
 				}
 
+				// if err := writer.Write(record); err != nil {
+				// 	return fmt.Errorf("error writing record to csv for %s: %v", demoFile, err)
+				// }
 				if err := writer.Write(record); err != nil {
 					fmt.Printf("Error writing record to csv for %s: %v\n", demoFile, err)
 					return
@@ -323,11 +349,11 @@ func processDemo(demoFile, outputDir string) {
 
 	err = parser.ParseToEnd()
 	if err != nil {
-		fmt.Printf("Error parsing demo %s: %v\n", demoFile, err)
-		return
+		return fmt.Errorf("error parsing demo %s: %v", demoFile, err)
 	}
 
 	fmt.Printf("Finished processing file: %s\n", demoFile)
+	return nil
 }
 
 // Helper function to convert the common.Team type to a string
