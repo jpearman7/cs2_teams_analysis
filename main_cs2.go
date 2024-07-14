@@ -47,11 +47,15 @@ type PlayerData struct {
 	Kills             int
 	Deaths            int
 	Assists           int
+	Attacked          bool
 	AttackedBy        []string
-	Attackers         []string
+	Health            int
 	HealthDamageTaken int
+	Armor             int
 	ArmorDamageTaken  int
+	BombPlantBegin    bool
 	BombPlanted       bool
+	BombDefuseStarted bool
 	BombDefused       bool
 	BombPlantSite     string
 	BombDefuseSite    string
@@ -128,8 +132,9 @@ func processDemo(demoFile, outputDir string) error {
 		"VelX", "VelY", "VelZ",
 		"ViewDirectionX", "ViewDirectionY",
 		"KillEvent", "KilledBy", "Killed", "Assisters", "Kills", "Deaths", "Assists",
-		"AttackedBy", "Attackers", "HealthDamageTaken", "ArmorDamageTaken",
-		"BombPlanted", "BombDefused", "BombPlantSite", "BombDefuseSite", "FlashDuration",
+		"Attacked", "AttackedBy", "Health", "HealthDamageTaken", "Armor", "ArmorDamageTaken",
+		"BombPlantBegin", "BombPlanted", "BombDefuseStarted", "BombDefused",
+		"BombPlantSite", "BombDefuseSite", "FlashDuration",
 	})
 
 	var roundNumber int
@@ -142,13 +147,23 @@ func processDemo(demoFile, outputDir string) error {
 	})
 
 	var lastProcessedSecond int = -1
-	var killEventData *events.Kill
-	damageInfo := make(map[uint64]map[string]*DamageInfo)
+	killEventData := make(map[string]*events.Kill)
+	damageInfo := make(map[string]map[string]*DamageInfo)
 	var bombPlantedData *events.BombPlanted
 	var bombDefusedData *events.BombDefused
+	assistInfo := make(map[string]string)
 
 	parser.RegisterEventHandler(func(e events.Kill) {
-		killEventData = &e
+		if e.Killer != nil {
+			killEventData[e.Killer.Name] = &e
+		}
+		if e.Victim != nil {
+			killEventData[e.Victim.Name] = &e
+		}
+		if e.Assister != nil {
+			killEventData[e.Assister.Name] = &e
+			assistInfo[e.Assister.Name] = e.Victim.Name
+		}
 	})
 
 	parser.RegisterEventHandler(func(e events.PlayerHurt) {
@@ -159,17 +174,27 @@ func processDemo(demoFile, outputDir string) error {
 		victim := e.Player
 		attacker := e.Attacker
 
-		if _, exists := damageInfo[victim.SteamID64]; !exists {
-			damageInfo[victim.SteamID64] = make(map[string]*DamageInfo)
+		if _, exists := damageInfo[victim.Name]; !exists {
+			damageInfo[victim.Name] = make(map[string]*DamageInfo)
+		}
+		if _, exists := damageInfo[attacker.Name]; !exists {
+			damageInfo[attacker.Name] = make(map[string]*DamageInfo)
 		}
 
+		victimName := victim.Name
 		attackerName := attacker.Name
-		if _, exists := damageInfo[victim.SteamID64][attackerName]; !exists {
-			damageInfo[victim.SteamID64][attackerName] = &DamageInfo{Attacker: attackerName}
+
+		if _, exists := damageInfo[victim.Name][attackerName]; !exists {
+			damageInfo[victim.Name][attackerName] = &DamageInfo{Attacker: attackerName}
+		}
+		if _, exists := damageInfo[attacker.Name][victimName]; !exists {
+			damageInfo[attacker.Name][victimName] = &DamageInfo{Attacker: victimName}
 		}
 
-		damageInfo[victim.SteamID64][attackerName].HealthDamageTaken += e.HealthDamageTaken
-		damageInfo[victim.SteamID64][attackerName].ArmorDamageTaken += e.ArmorDamageTaken
+		damageInfo[victim.Name][attackerName].HealthDamageTaken += e.HealthDamageTaken
+		damageInfo[victim.Name][attackerName].ArmorDamageTaken += e.ArmorDamageTaken
+		damageInfo[attacker.Name][victimName].HealthDamageTaken += e.HealthDamageTaken
+		damageInfo[attacker.Name][victimName].ArmorDamageTaken += e.ArmorDamageTaken
 	})
 
 	parser.RegisterEventHandler(func(e events.BombPlanted) {
@@ -179,6 +204,33 @@ func processDemo(demoFile, outputDir string) error {
 	parser.RegisterEventHandler(func(e events.BombDefused) {
 		bombDefusedData = &e
 	})
+
+	bombPlantBeginData := make(map[string]bool)
+	bombDefuseStartData := make(map[string]bool)
+
+	parser.RegisterEventHandler(func(e events.BombPlantBegin) {
+		if e.Player != nil {
+			bombPlantBeginData[e.Player.Name] = true
+		}
+	})
+
+	// parser.RegisterEventHandler(func(e events.BombPlantAborted) {
+	// 	if e.Player != nil {
+	// 		bombPlantBeginData[e.Player.Name] = false
+	// 	}
+	// })
+
+	parser.RegisterEventHandler(func(e events.BombDefuseStart) {
+		if e.Player != nil {
+			bombDefuseStartData[e.Player.Name] = true
+		}
+	})
+
+	// parser.RegisterEventHandler(func(e events.BombDefuseAborted) {
+	// 	if e.Player != nil {
+	// 		bombDefuseStartData[e.Player.Name] = false
+	// 	}
+	// })
 
 	parser.RegisterEventHandler(func(e events.FrameDone) {
 		tick := parser.GameState().IngameTick()
@@ -219,11 +271,15 @@ func processDemo(demoFile, outputDir string) error {
 					KilledBy:          "",
 					Killed:            "",
 					Assisters:         "",
+					Attacked:          false,
 					AttackedBy:        []string{},
-					Attackers:         []string{},
+					Health:            player.Health(),
 					HealthDamageTaken: 0,
+					Armor:             player.Armor(),
 					ArmorDamageTaken:  0,
+					BombPlantBegin:    bombPlantBeginData[player.Name],
 					BombPlanted:       false,
+					BombDefuseStarted: bombDefuseStartData[player.Name],
 					BombDefused:       false,
 					BombPlantSite:     "",
 					BombDefuseSite:    "",
@@ -246,38 +302,29 @@ func processDemo(demoFile, outputDir string) error {
 				playerData.Assists = player.Assists()
 
 				// Process kill events
-				if killEventData != nil {
-					if killEventData.Killer != nil && killEventData.Killer.Name == player.Name {
+				if killEvent, ok := killEventData[player.Name]; ok {
+					if killEvent.Killer != nil && killEvent.Killer.Name == player.Name {
 						playerData.KillEvent = true
-						if killEventData.Victim != nil {
-							playerData.Killed = killEventData.Victim.Name
+						if killEvent.Victim != nil {
+							playerData.Killed = killEvent.Victim.Name
 						}
 					}
-					if killEventData.Victim != nil && killEventData.Victim.Name == player.Name {
+					if killEvent.Victim != nil && killEvent.Victim.Name == player.Name {
 						playerData.KillEvent = true
-						if killEventData.Killer != nil {
-							playerData.KilledBy = killEventData.Killer.Name
+						if killEvent.Killer != nil {
+							playerData.KilledBy = killEvent.Killer.Name
 						}
 					}
-					if killEventData.Assister != nil {
-						playerData.Assisters = killEventData.Assister.Name
-					}
-					// Fill in KilledBy or Killed with player's name if blank and KillEvent is true
-					if playerData.KillEvent {
-						if playerData.KilledBy == "" {
-							playerData.KilledBy = player.Name
-						}
-						if playerData.Killed == "" {
-							playerData.Killed = player.Name
-						}
+					if killEvent.Assister != nil && killEvent.Assister.Name == player.Name {
+						playerData.Assisters = killEvent.Victim.Name
 					}
 				}
 
 				// Process damage info
-				if playerDamageInfo, exists := damageInfo[player.SteamID64]; exists {
+				if playerDamageInfo, exists := damageInfo[player.Name]; exists {
+					playerData.Attacked = true
 					for _, info := range playerDamageInfo {
 						playerData.AttackedBy = append(playerData.AttackedBy, info.Attacker)
-						playerData.Attackers = append(playerData.Attackers, info.Attacker)
 						playerData.HealthDamageTaken += info.HealthDamageTaken
 						playerData.ArmorDamageTaken += info.ArmorDamageTaken
 					}
@@ -319,30 +366,34 @@ func processDemo(demoFile, outputDir string) error {
 					strconv.Itoa(playerData.Kills),
 					strconv.Itoa(playerData.Deaths),
 					strconv.Itoa(playerData.Assists),
+					strconv.FormatBool(playerData.Attacked),
 					strings.Join(playerData.AttackedBy, ","),
-					strings.Join(playerData.Attackers, ","),
+					strconv.Itoa(playerData.Health),
 					strconv.Itoa(playerData.HealthDamageTaken),
+					strconv.Itoa(playerData.Armor),
 					strconv.Itoa(playerData.ArmorDamageTaken),
+					strconv.FormatBool(playerData.BombPlantBegin),
 					strconv.FormatBool(playerData.BombPlanted),
+					strconv.FormatBool(playerData.BombDefuseStarted),
 					strconv.FormatBool(playerData.BombDefused),
 					playerData.BombPlantSite,
 					playerData.BombDefuseSite,
 					strconv.FormatFloat(float64(playerData.FlashDuration), 'f', 2, 32),
 				}
 
-				// if err := writer.Write(record); err != nil {
-				// 	return fmt.Errorf("error writing record to csv for %s: %v", demoFile, err)
-				// }
 				if err := writer.Write(record); err != nil {
 					fmt.Printf("Error writing record to csv for %s: %v\n", demoFile, err)
 					return
 				}
 			}
 
-			killEventData = nil
-			damageInfo = make(map[uint64]map[string]*DamageInfo) // Reset damage info for the next second
+			killEventData = make(map[string]*events.Kill)
+			damageInfo = make(map[string]map[string]*DamageInfo)
 			bombPlantedData = nil
 			bombDefusedData = nil
+			assistInfo = make(map[string]string)
+			bombPlantBeginData = make(map[string]bool)
+			bombDefuseStartData = make(map[string]bool)
 			lastProcessedSecond = currentSecond
 		}
 	})
