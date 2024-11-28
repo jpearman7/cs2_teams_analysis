@@ -17,6 +17,7 @@ import (
 
 type DamageInfo struct {
 	Attacker          string
+	Target            string
 	HealthDamageTaken int
 	ArmorDamageTaken  int
 }
@@ -49,6 +50,8 @@ type PlayerData struct {
 	Assists           int
 	Attacked          bool
 	AttackedBy        []string
+	Attacking         bool
+	AttackingTarget   string
 	Health            int
 	HealthDamageTaken int
 	Armor             int
@@ -85,8 +88,6 @@ func main() {
 		err := processDemo(demoFile, outputDir)
 		if err != nil {
 			fmt.Printf("Error processing %s: %v\n", demoFile, err)
-			// Optionally, you can choose to continue with the next file
-			// continue
 		}
 	}
 }
@@ -126,13 +127,14 @@ func processDemo(demoFile, outputDir string) error {
 	writer := csv.NewWriter(output)
 	defer writer.Flush()
 
+	// Write CSV header
 	writer.Write([]string{
 		"Name", "IsBot", "PlayerID", "Team", "TeamID", "TeamScore", "RoundNumber", "Tick", "Time", "ClockTime",
 		"PosX", "PosY", "PosZ",
 		"VelX", "VelY", "VelZ",
 		"ViewDirectionX", "ViewDirectionY",
 		"KillEvent", "KilledBy", "Killed", "Assisters", "Kills", "Deaths", "Assists",
-		"Attacked", "AttackedBy", "Health", "HealthDamageTaken", "Armor", "ArmorDamageTaken",
+		"Attacked", "AttackedBy", "Attacking", "AttackingTarget", "Health", "HealthDamageTaken", "Armor", "ArmorDamageTaken",
 		"BombPlantBegin", "BombPlanted", "BombDefuseStarted", "BombDefused",
 		"BombPlantSite", "BombDefuseSite", "FlashDuration",
 	})
@@ -141,31 +143,45 @@ func processDemo(demoFile, outputDir string) error {
 	var roundStartTime float64
 	const roundDuration float64 = 115 // 1:55 in seconds
 
-	parser.RegisterEventHandler(func(e events.RoundStart) {
-		roundNumber++
-		roundStartTime = float64(parser.GameState().IngameTick()) / parser.TickRate()
-	})
-
 	var lastProcessedSecond int = -1
-	killEventData := make(map[string]*events.Kill)
+	killEventData := make(map[string][]*events.Kill)
 	damageInfo := make(map[string]map[string]*DamageInfo)
 	var bombPlantedData *events.BombPlanted
 	var bombDefusedData *events.BombDefused
-	assistInfo := make(map[string]string)
+	assistInfo := make(map[string][]string)
+	bombPlantBeginData := make(map[string]bool)
+	bombDefuseStartData := make(map[string]bool)
 
+	// Round start handler
+	parser.RegisterEventHandler(func(e events.RoundStart) {
+		roundNumber++
+		roundStartTime = float64(parser.GameState().IngameTick()) / parser.TickRate()
+		// Clear state at round start
+		bombPlantBeginData = make(map[string]bool)
+		bombDefuseStartData = make(map[string]bool)
+		bombPlantedData = nil
+		bombDefusedData = nil
+	})
+
+	// Kill event handler
 	parser.RegisterEventHandler(func(e events.Kill) {
 		if e.Killer != nil {
-			killEventData[e.Killer.Name] = &e
+			// Append kill event to killer's list
+			killEventData[e.Killer.Name] = append(killEventData[e.Killer.Name], &e)
 		}
 		if e.Victim != nil {
-			killEventData[e.Victim.Name] = &e
+			// Append kill event to victim's list
+			killEventData[e.Victim.Name] = append(killEventData[e.Victim.Name], &e)
 		}
 		if e.Assister != nil {
-			killEventData[e.Assister.Name] = &e
-			assistInfo[e.Assister.Name] = e.Victim.Name
+			// Append assist to assister's list
+			if e.Victim != nil {
+				assistInfo[e.Assister.Name] = append(assistInfo[e.Assister.Name], e.Victim.Name)
+			}
 		}
 	})
 
+	// Damage event handler
 	parser.RegisterEventHandler(func(e events.PlayerHurt) {
 		if e.Player == nil || e.Attacker == nil {
 			return
@@ -181,22 +197,31 @@ func processDemo(demoFile, outputDir string) error {
 			damageInfo[attacker.Name] = make(map[string]*DamageInfo)
 		}
 
-		victimName := victim.Name
 		attackerName := attacker.Name
-
 		if _, exists := damageInfo[victim.Name][attackerName]; !exists {
-			damageInfo[victim.Name][attackerName] = &DamageInfo{Attacker: attackerName}
-		}
-		if _, exists := damageInfo[attacker.Name][victimName]; !exists {
-			damageInfo[attacker.Name][victimName] = &DamageInfo{Attacker: victimName}
+			damageInfo[victim.Name][attackerName] = &DamageInfo{
+				Attacker: attackerName,
+				Target:   victim.Name,
+			}
 		}
 
+		// Record damage on attacker's side
+		victimName := victim.Name
+		if _, exists := damageInfo[attacker.Name][victimName]; !exists {
+			damageInfo[attacker.Name][victimName] = &DamageInfo{
+				Attacker: attackerName,
+				Target:   victimName,
+			}
+		}
+
+		// Update damage values
 		damageInfo[victim.Name][attackerName].HealthDamageTaken += e.HealthDamageTaken
 		damageInfo[victim.Name][attackerName].ArmorDamageTaken += e.ArmorDamageTaken
 		damageInfo[attacker.Name][victimName].HealthDamageTaken += e.HealthDamageTaken
 		damageInfo[attacker.Name][victimName].ArmorDamageTaken += e.ArmorDamageTaken
 	})
 
+	// Bomb event handlers
 	parser.RegisterEventHandler(func(e events.BombPlanted) {
 		bombPlantedData = &e
 	})
@@ -205,20 +230,17 @@ func processDemo(demoFile, outputDir string) error {
 		bombDefusedData = &e
 	})
 
-	bombPlantBeginData := make(map[string]bool)
-	bombDefuseStartData := make(map[string]bool)
-
 	parser.RegisterEventHandler(func(e events.BombPlantBegin) {
 		if e.Player != nil {
 			bombPlantBeginData[e.Player.Name] = true
 		}
 	})
 
-	// parser.RegisterEventHandler(func(e events.BombPlantAborted) {
-	// 	if e.Player != nil {
-	// 		bombPlantBeginData[e.Player.Name] = false
-	// 	}
-	// })
+	parser.RegisterEventHandler(func(e events.BombPlantAborted) {
+		if e.Player != nil {
+			bombPlantBeginData[e.Player.Name] = false
+		}
+	})
 
 	parser.RegisterEventHandler(func(e events.BombDefuseStart) {
 		if e.Player != nil {
@@ -226,12 +248,13 @@ func processDemo(demoFile, outputDir string) error {
 		}
 	})
 
-	// parser.RegisterEventHandler(func(e events.BombDefuseAborted) {
-	// 	if e.Player != nil {
-	// 		bombDefuseStartData[e.Player.Name] = false
-	// 	}
-	// })
+	parser.RegisterEventHandler(func(e events.BombDefuseAborted) {
+		if e.Player != nil {
+			bombDefuseStartData[e.Player.Name] = false
+		}
+	})
 
+	// Frame processing
 	parser.RegisterEventHandler(func(e events.FrameDone) {
 		tick := parser.GameState().IngameTick()
 		gameTime := float64(tick) / parser.TickRate()
@@ -245,12 +268,12 @@ func processDemo(demoFile, outputDir string) error {
 
 			for _, player := range parser.GameState().Participants().Playing() {
 				if player == nil {
-					continue // Skip if player is nil
+					continue
 				}
 
 				teamState := player.TeamState
 				if teamState == nil {
-					continue // Skip if teamState is nil
+					continue
 				}
 
 				playerData := PlayerData{
@@ -302,31 +325,55 @@ func processDemo(demoFile, outputDir string) error {
 				playerData.Assists = player.Assists()
 
 				// Process kill events
-				if killEvent, ok := killEventData[player.Name]; ok {
-					if killEvent.Killer != nil && killEvent.Killer.Name == player.Name {
-						playerData.KillEvent = true
-						if killEvent.Victim != nil {
-							playerData.Killed = killEvent.Victim.Name
+				if killEvents, ok := killEventData[player.Name]; ok {
+					for _, killEvent := range killEvents {
+						if killEvent.Killer != nil && killEvent.Killer.Name == player.Name {
+							playerData.KillEvent = true
+							if killEvent.Victim != nil {
+								if playerData.Killed != "" {
+									playerData.Killed += "," + killEvent.Victim.Name
+								} else {
+									playerData.Killed = killEvent.Victim.Name
+								}
+							}
+						}
+						if killEvent.Victim != nil && killEvent.Victim.Name == player.Name {
+							playerData.KillEvent = true
+							if killEvent.Killer != nil {
+								if playerData.KilledBy != "" {
+									playerData.KilledBy += "," + killEvent.Killer.Name
+								} else {
+									playerData.KilledBy = killEvent.Killer.Name
+								}
+							}
 						}
 					}
-					if killEvent.Victim != nil && killEvent.Victim.Name == player.Name {
-						playerData.KillEvent = true
-						if killEvent.Killer != nil {
-							playerData.KilledBy = killEvent.Killer.Name
-						}
-					}
-					if killEvent.Assister != nil && killEvent.Assister.Name == player.Name {
-						playerData.Assisters = killEvent.Victim.Name
-					}
+				}
+
+				// Process assists
+				if assists, ok := assistInfo[player.Name]; ok && len(assists) > 0 {
+					playerData.Assisters = strings.Join(assists, ",")
 				}
 
 				// Process damage info
 				if playerDamageInfo, exists := damageInfo[player.Name]; exists {
-					playerData.Attacked = true
+					var attackingTargets []string
 					for _, info := range playerDamageInfo {
-						playerData.AttackedBy = append(playerData.AttackedBy, info.Attacker)
-						playerData.HealthDamageTaken += info.HealthDamageTaken
-						playerData.ArmorDamageTaken += info.ArmorDamageTaken
+						if info.Attacker == player.Name {
+							// This player is the attacker
+							playerData.Attacking = true
+							attackingTargets = append(attackingTargets, info.Target)
+						}
+						if info.Target == player.Name {
+							// This player is being attacked
+							playerData.Attacked = true
+							playerData.AttackedBy = append(playerData.AttackedBy, info.Attacker)
+							playerData.HealthDamageTaken += info.HealthDamageTaken
+							playerData.ArmorDamageTaken += info.ArmorDamageTaken
+						}
+					}
+					if len(attackingTargets) > 0 {
+						playerData.AttackingTarget = strings.Join(attackingTargets, ",")
 					}
 				}
 
@@ -368,6 +415,8 @@ func processDemo(demoFile, outputDir string) error {
 					strconv.Itoa(playerData.Assists),
 					strconv.FormatBool(playerData.Attacked),
 					strings.Join(playerData.AttackedBy, ","),
+					strconv.FormatBool(playerData.Attacking),
+					playerData.AttackingTarget,
 					strconv.Itoa(playerData.Health),
 					strconv.Itoa(playerData.HealthDamageTaken),
 					strconv.Itoa(playerData.Armor),
@@ -383,17 +432,11 @@ func processDemo(demoFile, outputDir string) error {
 
 				if err := writer.Write(record); err != nil {
 					fmt.Printf("Error writing record to csv for %s: %v\n", demoFile, err)
-					return
 				}
 			}
-
-			killEventData = make(map[string]*events.Kill)
+			killEventData = make(map[string][]*events.Kill)
 			damageInfo = make(map[string]map[string]*DamageInfo)
-			bombPlantedData = nil
-			bombDefusedData = nil
-			assistInfo = make(map[string]string)
-			bombPlantBeginData = make(map[string]bool)
-			bombDefuseStartData = make(map[string]bool)
+			assistInfo = make(map[string][]string)
 			lastProcessedSecond = currentSecond
 		}
 	})
